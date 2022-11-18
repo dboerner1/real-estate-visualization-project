@@ -1,0 +1,216 @@
+---
+title: 'San Francisco Multifamily Real Estate Development'
+author: 'Dean Boerner/ECON 631'
+date: "5/12/2022"
+output: ioslides_presentation
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, fig.width=7, fig.height=4)
+
+
+library(tidyverse)
+library(sf)
+library("RSocrata")
+library(rgdal)
+library(viridis)
+library(plotly)
+library(ggrepel)  
+
+#making the map theme from the textbook
+theme_map <- function(base_size=9, base_family="") { require(grid)
+theme_bw(base_size=base_size, base_family=base_family) %+replace% theme(axis.line=element_blank(),
+axis.text=element_blank(), 
+axis.ticks=element_blank(), 
+axis.title=element_blank(), 
+panel.background=element_blank(), 
+panel.border=element_blank(), 
+panel.grid=element_blank(), 
+panel.spacing=unit(0, "lines"), 
+plot.background=element_blank(), 
+legend.justification = c(0,0), 
+legend.position = c(0,0)) 
+}
+
+#reading in cleaned data
+mf_raw <- read.csv('mf.csv', stringsAsFactors = FALSE)
+mf_raw <- as_tibble(mf_raw)  
+
+#converting to an sf object, where longitudes are x-coordinates, latitudes y-.
+mf_sf <- st_as_sf(x=mf_raw, coords = c("Longitude", "Latitude"),
+    agr = "constant",
+    crs = 7131,
+    stringsAsFactors = FALSE,
+    remove = TRUE
+    )
+
+#Viz 1
+url <- 'https://data.sfgov.org/resource/xfcw-9evu.geojson'
+geo_object <- read_sf(url)
+st_crs(geo_object) <- 7131
+
+mf_joined <- st_join(mf_sf, geo_object, join=st_within)
+
+#Vizzes 2, 3, 4
+url2 <- 'https://data.sfgov.org/resource/keex-zmn4.geojson'
+geo_object2 <- read_sf(url2)
+st_crs(geo_object2) <- 7131
+geo_object2 <- st_transform(geo_object2, 7131)
+
+mf_supervisor_joined <- st_join(mf_sf, geo_object2, join=st_within)
+```
+## Introduction
+
+- Task: Find where multifamily projects are being proposed and approved around the city of San Francisco  
+
+- Motivation: Narrowing down number of neighborhoods to choose from in crafting a West Coast investment, development strategy 
+
+- The Data: construction, entitlement activity on all ongoing project plans – posted quarterly by the city  
+  - Cleaning involved filtering to projects with 2 or more residential units and to those having been updated in given quarterly reports.  
+  
+- In short: We can look at total activity of different kinds (e.g. brand-new filings, new approvals, new construction).
+
+## Net Multifamily Units Starting Construction In S.F. Since 2015 
+```{r Figure 1, fig.cap="Data Source: DataSF. Counting construction starts."}
+#grouping for total number of filings by neighborhood
+mf_sf_summed <- group_by(as_tibble(mf_joined), nhood) %>% 
+  summarize('Number_of_Filings' = n())
+
+#adding missing neighborhoods
+other_neighs <- tibble(nhood = c("Golden Gate Park", "McLaren Park", "Seacliff", "Presidio", "Lincoln Park"), 
+                       Number_of_Filings = c(0, 0, 0, 0, 0))
+mf_sf_summed <- add_row(mf_sf_summed, other_neighs)
+
+#joining the map data to total number of filings on neighborhood
+mf_sf_summed_joined <- left_join(geo_object, mf_sf_summed)
+
+#checking formatting of these specific neighborhood names and making a new column in the process
+mf_sf_summed_joined$Neighborhood <- ifelse(mf_sf_summed_joined$nhood == 'Golden Gate Park', 'Golden Gate Park', 
+                                           ifelse(mf_sf_summed_joined$nhood == 'Lincoln Park', 'Lincoln Park', 
+                                                  ifelse(mf_sf_summed_joined$nhood == 'Seacliff', 'Seacliff', 
+                                                         ifelse(mf_sf_summed_joined$nhood == 'Presidio', 'Presidio', 
+                                                                ifelse(mf_sf_summed_joined$nhood == 'McLaren Park', 'McLaren Park', 
+                                                                       mf_sf_summed_joined$nhood)))))
+
+#adding progress columns to the original spatially joined dataframe
+mf_joined$Progress <- ifelse(mf_joined$Status %in% c('BP Filed', 'BP FIled', 'BP FILED', 'PL Filed', 'PL FILED'), 'Filing', 
+                             ifelse(mf_joined$Status %in% c('BP APPROVED', 'BP ISSUED', 'Construction', 'CONSTRUCTION', 
+                                                            'PL Approved', 'PL APPROVED'), 'Approval', 'Neither'))
+mf_joined$Planning_Filing <- ifelse(mf_joined$Status %in% c('PL Filed', 'PL FILED'), 'Planning Filing', 'Not')
+mf_joined$Construction <- ifelse(mf_joined$Status %in% c('Construction', 'CONSTRUCTION'), 'Construction', 'Not')
+
+#filtering to only new filings, grouping by neighborhood, counting new filings, summming net units by neighborhood for those new filings, 
+#and converting to tibble for join with map data joined data.
+mf_other_group <- mf_joined %>% 
+  filter(New_Filing == 1 & Construction == 'Construction') %>% 
+  group_by(nhood) %>% 
+  summarize("New_Filings" = n(), "Multifamily_Units_Started" = sum(Net_Units)) %>% 
+  as_tibble()
+
+#removing superfluous geometry column
+mf_other_group <- select(mf_other_group, -geometry)
+
+#joining new filing tibble to map data
+full_other_join <- left_join(mf_sf_summed_joined, mf_other_group)
+#for neighborhood labels
+full_other_join$centroid <- st_centroid(full_other_join$geometry)
+full_other_join$X <- st_coordinates(full_other_join$centroid)[, 1]
+full_other_join$Y <- st_coordinates(full_other_join$centroid)[, 2]
+
+
+gg_map_other_pt1 <- ggplot(full_other_join) + geom_sf(aes(fill=Multifamily_Units_Started, text=paste("<b>", Neighborhood, 
+                                                                                                     ": <b>", Multifamily_Units_Started, 
+                                                                                                     "multifamily units started since 2015")))
+gg_map_other_pt2 <- gg_map_other_pt1 + geom_text(aes(x=X, y=Y, label=Neighborhood), size=1.5) + 
+  scale_fill_fermenter(palette = "YIGn", direction=1, labels=scales::comma) + labs(fill = "Net Units Started") + theme_map() + 
+  theme(legend.background = element_blank())
+
+ggplotly(gg_map_other_pt2, tooltip="text") %>% 
+style(hoverlabel=list(bgcolor = "white"), hoveron = "fill")
+```
+## Planning Filing, Approval Progress by Supervisor District Since 2015
+```{r Figure 2, fig.cap="Data Source: DataSF. Counting new planning applications, approvals"}
+#fig 2
+
+#defining progress in supervisor-joined data
+mf_supervisor_joined$Progress <- ifelse(mf_supervisor_joined$Status %in% c('BP Filed', 'BP FIled', 'BP FILED', 'PL Filed', 'PL FILED'), 'Filing', ifelse(mf_supervisor_joined$Status %in% c('BP APPROVED', 'BP ISSUED', 'Construction', 'CONSTRUCTION', 'PL Approved', 'PL APPROVED'), 'Approval', 'Neither'))
+mf_supervisor_joined$Planning_Filing <- ifelse(mf_supervisor_joined$Status %in% c('PL Filed', 'PL FILED'), 'Planning Filing', 
+                                               ifelse(mf_supervisor_joined$Status %in% c('PL Approved', 'PL APPROVED'), 
+'Planning Approval', 'Neither'))
+
+#getting data to adjust for supervisor district size
+geo_object2_modified <- geo_object2
+geo_object2_modified$some_distance_squared <- st_area(geo_object2_modified$geometry)
+geo_object2_modified$rough_square_miles <- geo_object2_modified$some_distance_squared * 3685.89
+geo_object2_modified <- as_tibble(select(geo_object2_modified, supdist, rough_square_miles))
+geo_object2_modified <- select(geo_object2_modified, -geometry)
+geo_object2_modified$rough_square_miles <- as.numeric(geo_object2_modified$rough_square_miles)
+
+#***test
+rel_supe_by_progress <- mf_supervisor_joined %>% 
+  filter(New_Filing == 1 & Planning_Filing %in% c('Planning Filing', 'Planning Approval')) %>% 
+  group_by(supdist, Planning_Filing) %>% 
+  summarize("Number_of_Steps" = sum(New_Filing), "Net_Units" = sum(Net_Units)) %>% 
+  as_tibble()
+
+rel_supe_by_progress <- left_join(rel_supe_by_progress, geo_object2_modified)
+rel_supe_by_progress$adjusted_number_of_steps <- (rel_supe_by_progress$Number_of_Steps) / (rel_supe_by_progress$rough_square_miles)
+rel_supe_by_progress$adjusted_net_units <- (rel_supe_by_progress$Net_Units) / (rel_supe_by_progress$rough_square_miles)
+
+rel_supe_by_progress$District <- c(1, 1, 10, 10, 11, 11, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9)
+
+title_mod = "Districts 6, 9: Most Activity"
+title_2_mod = "6, 3: Most Activity Per Square Mile"
+
+#could use seperate geom_texts with seperate agged tibbles to add labels for each fill
+gross_counts_update <- ggplot(subset(mf_supervisor_joined, New_Filing == 1 & Planning_Filing != 'Neither'), 
+                aes(x=reorder(supervisor, New_Filing, sum), fill=Planning_Filing))
+gs2_update <- gross_counts_update + geom_bar(alpha=0.8) + 
+  scale_fill_manual(values=c("springgreen3", "gold1"), labels=c("Approvals", "Applications")) + labs(title=title_mod, x="District", y="Planning Filings", fill="Filing Type") + 
+  coord_flip() + theme(legend.position = c(0.88, 0.82), 
+                       legend.background = element_blank(),
+                       legend.key.size = unit(.5, 'cm'), #change legend key size
+                       legend.title = element_text(size=5), #change legend title font size
+                       legend.text = element_text(size=5)) #change legend text font size)
+
+#adjusting for area
+adjusted_counts_mod <- ggplot(rel_supe_by_progress, aes(x=reorder(District, adjusted_number_of_steps, sum), y=adjusted_number_of_steps, fill=Planning_Filing))
+adj2_mod <- adjusted_counts_mod + geom_bar(stat = "identity", alpha=0.8) + scale_fill_manual(values=c("springgreen3", "gold1")) + guides(fill=FALSE) + labs(title=title_2_mod, x="District", y="Planning Filings per Square Mile") + coord_flip()
+
+cowplot::plot_grid(gs2_update, adj2_mod, ncol=2, align = "h")
+```
+## Approvals-To-Applications Ratios By Supervisor District Since 2015
+```{r Figure 3, fig.cap="Data Source: DataSF. Dividing number of planning approvals by applications"}
+supe_approvals_to_filings <- tibble(supdist=c('SUPERVISORIAL DISTRICT 1', 'SUPERVISORIAL DISTRICT 2', 'SUPERVISORIAL DISTRICT 3',
+                                              'SUPERVISORIAL DISTRICT 4', 'SUPERVISORIAL DISTRICT 5', 'SUPERVISORIAL DISTRICT 6',
+                                              'SUPERVISORIAL DISTRICT 7', 'SUPERVISORIAL DISTRICT 8', 'SUPERVISORIAL DISTRICT 9',
+                                              'SUPERVISORIAL DISTRICT 10', 'SUPERVISORIAL DISTRICT 11'),
+                                    approvals_to_filings=c((1/16), (6/31), (4/35), (1/6), (11/37), (21/70), (2/5), (4/22), (11/46),
+                                                          (12/23), (1/10)),
+                                    Approvals=c(1, 6, 4, 1, 11, 21, 2, 4, 11, 12, 1),
+                                    Filings=c(16, 31, 35, 6, 37, 70, 5, 22, 46, 23, 10),
+                                    Square_Miles=c(4.4, 5.2, 1.8, 3.8, 2.5, 3.7, 7.6, 3.4, 3.1, 8.3, 3.0))
+supe_approvals_to_filings_joined <- left_join(supe_approvals_to_filings, geo_object2)
+supe_approvals_to_filings_joined <- st_as_sf(x=supe_approvals_to_filings_joined, agr = "constant", crs = 7131, stringsAsFactors = FALSE)
+
+supe_approvals_to_filings_joined$centroid <- st_centroid(supe_approvals_to_filings_joined$geometry)
+supe_approvals_to_filings_joined$X <- st_coordinates(supe_approvals_to_filings_joined$centroid)[, 1]
+supe_approvals_to_filings_joined$Y <- st_coordinates(supe_approvals_to_filings_joined$centroid)[, 2]
+
+sup_plot1 <- ggplot(supe_approvals_to_filings_joined) + geom_sf(aes(fill=approvals_to_filings, 
+                                                                    text=paste("District", "<b>", supervisor, "(", "<b>", Square_Miles, "sq. mi.): ", "<b>", Approvals, "approvals and", "<b>", Filings, "applications since 2015")))
+
+sup_plot2 <- sup_plot1 + geom_text(aes(x=X, y=Y, label=supervisor)) + scale_fill_fermenter(palette = "YIGn", direction=1) + 
+  labs(fill="Approvals/Applications") + theme_map() 
+ggplotly(sup_plot2, tooltip="text") %>%
+style(hoverlabel=list(bgcolor = "white"), hoveron = "fill")
+```
+
+## Conclusion
+
+- The Bayview Hunters Point and Potrero Hill neighborhoods might offer the most attractive combination of higher growth trajectory and lower disapproval risk.  
+- I recommend that the firm's current property selection efforts zero in on District 10 sites but that it hold off on any action until completing further research. Caveats include:  
+  - Where is high vs. low saturation a flaw versus a feature?  
+  - Where do high approvals relative to filings indicate approval tendencies rather than a dip in filings?  
+  
+- At the very least, high total and relative number of approvals in Bayview Hunters Point, Potrero Hill, and neighboring submarkets warrant serious consideration.
+
